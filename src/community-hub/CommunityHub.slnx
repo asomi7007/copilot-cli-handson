@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="CommunityHub.Tests/CommunityHub.Tests.csproj" />
+  <Project Path="CommunityHub/CommunityHub.csproj" />
+  <Project Path="CommunityHub.IntegrationTests/CommunityHub.IntegrationTests.csproj" />
+</Solution>

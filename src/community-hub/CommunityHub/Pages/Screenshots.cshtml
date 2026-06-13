@@ -1,0 +1,80 @@
+@page "/screenshots"
+@model CommunityHub.Pages.ScreenshotsModel
+@{
+    Layout = null;
+}
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Screenshots Gallery - Microsoft Build 2026</title>
+	<link rel="stylesheet" href="/css/dashboard.css" />
+</head>
+<body>
+	<header class="brand-bar">
+		<span class="ms-logo" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+		<span class="brand-text">Microsoft Build</span>
+		<span class="brand-copilot" title="Powered by GitHub Copilot">
+			<span class="copilot-mark" aria-hidden="true">@Html.Raw(ScreenshotsModel.CopilotIcon)</span>
+			<span>GitHub Copilot</span>
+		</span>
+		<span class="brand-section">/ Lab 502 · Screenshots Gallery (@Model.Items.Count)</span>
+		<form class="tenant-picker" method="get">
+			<label for="tenant-select">Tenant</label>
+			<select id="tenant-select" name="tenant" onchange="this.form.submit()">
+				@foreach (var tenant in Model.TenantOptions)
+				{
+					if (tenant == Model.SelectedTenant)
+					{
+						<option value="@tenant" selected>@tenant</option>
+					}
+					else
+					{
+						<option value="@tenant">@tenant</option>
+					}
+				}
+			</select>
+		</form>
+	</header>
+	<div class="copilot-stripe" aria-hidden="true"></div>
+	<div class="deco tl" aria-hidden="true">' ' ' '
+' ' ' '
+' ' ' '</div>
+	<div class="deco tr" aria-hidden="true">' ' ' '
+' ' ' '
+' ' ' '</div>
+	<div class="deco bl" aria-hidden="true">' ' ' '
+' ' ' '</div>
+	<div class="deco br" aria-hidden="true">' ' ' '
+' ' ' '</div>
+	<main class="wide-main">
+		<section class="panel screenshots-panel">
+			<div class="copilot-hero">
+				<div class="hero-text">
+					<div class="pixel-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+					<span class="copilot-tag">
+						<span class="copilot-mark" aria-hidden="true">@Html.Raw(ScreenshotsModel.CopilotIcon)</span>
+						Powered by GitHub Copilot
+					</span>
+					<h1>Now shipping<span class="colon">:</span><br>Screenshots Gallery</h1>
+					<p class="lede">@Model.Items.Count uploaded screenshots for @Model.SelectedTenant are shown below.</p>
+				</div>
+			</div>
+			@if (Model.Items.Count > 0)
+			{
+				<div class="screenshots-grid">
+					@foreach (var url in Model.Items)
+					{
+						<a class="screenshot-tile" href="@url" target="_blank" rel="noopener noreferrer" title="Open screenshot">
+							<img src="@url" alt="Screenshot from @Model.SelectedTenant" loading="lazy" />
+						</a>
+					}
+				</div>
+			}
+			else
+			{
+				<div class="empty">No screenshots saved yet.</div>
+			}
+		</section>
+	</main>
+</body>
+</html>

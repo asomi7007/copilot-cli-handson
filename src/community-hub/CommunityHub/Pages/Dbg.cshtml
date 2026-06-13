@@ -1,0 +1,152 @@
+@page "/dbg"
+@model CommunityHub.Pages.DbgModel
+@{
+    Layout = null;
+}
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Debug - Lab 502 Community Hub</title>
+	<link rel="stylesheet" href="/css/dashboard.css" />
+	<link rel="stylesheet" href="/css/dbg.css" />
+</head>
+<body>
+	<header class="brand-bar">
+		<span class="ms-logo" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+		<span class="brand-text">Microsoft Build</span>
+		<span class="brand-copilot" title="Powered by GitHub Copilot">
+			<span class="copilot-mark" aria-hidden="true">@Html.Raw(ActivityModel.CopilotIcon)</span>
+			<span>GitHub Copilot</span>
+		</span>
+		<span class="brand-section">/ Lab 502 &middot; Debug</span>
+		<span class="brand-pill">DBG</span>
+	</header>
+	<div class="copilot-stripe" aria-hidden="true"></div>
+	<main class="debug-page">
+		<section class="panel">
+			<div class="pixel-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+			<h1>Debug</h1>
+			<table class="debug-meta">
+				<tr><th>Key</th><th>Value</th></tr>
+				<tr><td>Version</td><td>@Model.Version</td></tr>
+				@if (Model.DbInfo is not null)
+				{
+					<tr><td>Database</td><td>@Model.DbInfo.DatabaseName</td></tr>
+					<tr>
+						<td>Collation</td>
+						<td>
+							@Model.DbInfo.Collation
+							@if (Model.DbInfo.IsCaseInsensitive.HasValue)
+							{
+								<span class="collation-case">(@(Model.DbInfo.IsCaseInsensitive.Value ? "case insensitive" : "case sensitive"))</span>
+							}
+						</td>
+					</tr>
+				}
+			</table>
+
+			<section class="debug-actions">
+				<h2>Delete data</h2>
+				@if (Model.StatusMessage is not null)
+				{
+					<p class="debug-status">@Model.StatusMessage</p>
+				}
+				@if (Model.ErrorMessage is not null)
+				{
+					<p class="debug-error">@Model.ErrorMessage</p>
+				}
+				<form method="post" class="debug-delete-form">
+					@Html.AntiForgeryToken()
+					<label for="tenant-select">Tenant</label>
+					<select id="tenant-select" name="tenant">
+						@foreach (var tenant in Model.TenantOptions)
+						{
+							if (string.Equals(tenant, Model.SelectedTenant, StringComparison.OrdinalIgnoreCase))
+							{
+								<option value="@tenant" selected>@tenant</option>
+							}
+							else
+							{
+								<option value="@tenant">@tenant</option>
+							}
+						}
+					</select>
+					<button type="submit" asp-page-handler="DeleteTenant" onclick="return confirm('Delete all debug data and stored files for the selected tenant?');">Delete tenant data</button>
+					<button type="submit" asp-page-handler="DeleteAll" class="danger" onclick="return confirm('Delete debug data and stored files for all tenants?');">Delete all tenant data</button>
+				</form>
+			</section>
+
+			@if (!Model.HasSqlDump)
+			{
+				<p class="muted">SQL table dump is not available in local mode.</p>
+			}
+			else if (Model.Tables.Count == 0 && Model.MissingTables.Count == 0)
+			{
+				<p class="muted">No SQL tables found.</p>
+			}
+			else
+			{
+				foreach (var table in Model.Tables)
+				{
+					<section class="debug-table">
+						<h2>@table.Schema.@table.Name (@table.Rows.Count rows)</h2>
+						<form method="post" class="debug-create-table-form">
+							@Html.AntiForgeryToken()
+							<input type="hidden" name="schema" value="@table.Schema" />
+							<input type="hidden" name="table" value="@table.Name" />
+							<button type="submit" asp-page-handler="DropTable" class="danger" onclick="return confirm('Drop table @table.Schema.@table.Name? This cannot be undone.');">Drop table</button>
+						</form>
+						@if (table.Columns.Count == 0)
+						{
+							<p class="muted">No columns found.</p>
+						}
+						else
+						{
+							<div class="debug-table-scroll">
+								<table>
+									<thead>
+										<tr>
+											@foreach (var column in table.Columns)
+											{
+												<th>@column</th>
+											}
+										</tr>
+									</thead>
+									<tbody>
+										@if (table.Rows.Count == 0)
+										{
+											<tr><td colspan="@table.Columns.Count">No rows.</td></tr>
+										}
+										else
+										{
+											foreach (var row in table.Rows)
+											{
+												<tr>
+													@foreach (var value in row)
+													{
+														<td>@value</td>
+													}
+												</tr>
+											}
+										}
+									</tbody>
+								</table>
+							</div>
+						}
+					</section>
+				}
+				foreach (var tableName in Model.MissingTables)
+				{
+					<section class="debug-table">
+						<h2>@tableName <span class="muted">(table does not exist)</span></h2>
+						<form method="post" class="debug-create-table-form">
+							@Html.AntiForgeryToken()
+							<button type="submit" asp-page-handler="CreateTables">Create missing tables</button>
+						</form>
+					</section>
+				}
+			}
+		</section>
+	</main>
+</body>
+</html>

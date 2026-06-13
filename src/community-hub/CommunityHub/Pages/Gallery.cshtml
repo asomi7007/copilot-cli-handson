@@ -1,0 +1,87 @@
+@page "/gallery"
+@using CommunityHub.Models
+@model CommunityHub.Pages.GalleryModel
+@{
+    Layout = null;
+}
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Invaders Gallery — Microsoft Build 2026</title>
+	<link rel="stylesheet" href="/css/dashboard.css" />
+</head>
+<body>
+	<header class="brand-bar">
+		<span class="ms-logo" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+		<span class="brand-text">Microsoft Build</span>
+		<span class="brand-copilot" title="Powered by GitHub Copilot">
+			<span class="copilot-mark" aria-hidden="true">@Html.Raw(GalleryModel.CopilotIcon)</span>
+			<span>GitHub Copilot</span>
+		</span>
+		<span class="brand-section">/ Lab 502 · Invaders Gallery</span>
+		<form class="tenant-picker" method="get">
+			<label for="tenant-select">Tenant</label>
+			@if (Model.Limit.HasValue)
+			{
+				<input type="hidden" name="limit" value="@Model.Limit.Value" />
+			}
+			<select id="tenant-select" name="tenant" onchange="this.form.submit()">
+				@foreach (var tenant in Model.TenantOptions)
+				{
+					if (tenant == Model.SelectedTenant)
+					{
+						<option value="@tenant" selected>@tenant</option>
+					}
+					else
+					{
+						<option value="@tenant">@tenant</option>
+					}
+				}
+			</select>
+		</form>
+	</header>
+	<div class="copilot-stripe" aria-hidden="true"></div>
+	<div class="deco tl" aria-hidden="true">' ' ' '
+' ' ' '
+' ' ' '</div>
+	<div class="deco tr" aria-hidden="true">' ' ' '
+' ' ' '
+' ' ' '</div>
+	<div class="deco bl" aria-hidden="true">' ' ' '
+' ' ' '</div>
+	<div class="deco br" aria-hidden="true">' ' ' '
+' ' ' '</div>
+	<main>
+		<section class="panel">
+			<div class="copilot-hero">
+				<div class="hero-text">
+					<div class="pixel-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+					<span class="copilot-tag">
+						<span class="copilot-mark" aria-hidden="true">@Html.Raw(GalleryModel.CopilotIcon)</span>
+						Powered by GitHub Copilot
+					</span>
+					<h1>Now shipping<span class="colon">:</span><br>Invaders Gallery</h1>
+					<p class="lede">Uploaded games are listed below. Each link opens the saved HTML in a new tab.</p>
+				</div>
+			</div>
+			<div class="gallery-warning" role="note" aria-label="Community content warning">
+				<span class="warning-icon" aria-hidden="true">!</span>
+				<p><strong>Community content.</strong> These samples are contributed by participants and have not been vetted or scanned for misuse. Be cautious when opening games.</p>
+			</div>
+			<ul class="gallery-list">
+				@if (Model.Items.Count > 0)
+				{
+					foreach (var item in Model.Items)
+					{
+						<li><a href="@item.Url" target="_blank" rel="noopener noreferrer">@item.Name</a></li>
+					}
+				}
+				else
+				{
+					<li class="empty">No games uploaded yet.</li>
+				}
+			</ul>
+		</section>
+	</main>
+</body>
+</html>

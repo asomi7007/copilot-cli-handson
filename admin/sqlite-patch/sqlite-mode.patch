@@ -1,0 +1,864 @@
+diff --git a/src/community-hub/CommunityHub/CommunityHub.csproj b/src/community-hub/CommunityHub/CommunityHub.csproj
+index af8c945..160c84e 100644
+--- a/src/community-hub/CommunityHub/CommunityHub.csproj
++++ b/src/community-hub/CommunityHub/CommunityHub.csproj
+@@ -12,6 +12,7 @@
+     <PackageReference Include="Microsoft.ApplicationInsights.AspNetCore" Version="3.1.1" />
+     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.1" />
+     <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="1.0.0" />
++    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.3.0" />
+   </ItemGroup>
+ 
+diff --git a/src/community-hub/CommunityHub/Config/AppConfig.cs b/src/community-hub/CommunityHub/Config/AppConfig.cs
+index 4916144..6e89c2b 100644
+--- a/src/community-hub/CommunityHub/Config/AppConfig.cs
++++ b/src/community-hub/CommunityHub/Config/AppConfig.cs
+@@ -5,7 +5,8 @@ namespace CommunityHub.Config;
+ public enum AppMode
+ {
+     Local,
+-    Cloud
++    Cloud,
++    Sqlite
+ }
+ 
+ public partial class AppConfig
+@@ -17,6 +18,10 @@ public partial class AppConfig
+     // Local mode
+     public string LocalDataDir { get; set; } = ".";
+ 
++    // Sqlite mode -- path to the SQLite database file (place on a persistent volume,
++    // e.g. /home/data/communityhub.db on Azure App Service).
++    public string SqliteDbPath { get; set; } = "communityhub.db";
++
+     // Cloud mode — Azure SQL
+     public string SqlServer { get; set; } = "";
+     public string SqlDatabase { get; set; } = "dashboard";
+@@ -38,10 +43,15 @@ public partial class AppConfig
+     public static AppConfig Load()
+     {
+         var modeStr = EnvOr("APP_MODE", "local");
+-        if (modeStr != "local" && modeStr != "cloud")
+-            throw new InvalidOperationException($"APP_MODE must be 'local' or 'cloud', got '{modeStr}'");
++        if (modeStr != "local" && modeStr != "cloud" && modeStr != "sqlite")
++            throw new InvalidOperationException($"APP_MODE must be 'local', 'cloud', or 'sqlite', got '{modeStr}'");
+ 
+-        var mode = modeStr == "cloud" ? AppMode.Cloud : AppMode.Local;
++        var mode = modeStr switch
++        {
++            "cloud" => AppMode.Cloud,
++            "sqlite" => AppMode.Sqlite,
++            _ => AppMode.Local
++        };
+         var port = EnvOr("PORT", "1345");
+ 
+         var config = new AppConfig
+@@ -66,6 +76,26 @@ public partial class AppConfig
+             return config;
+         }
+ 
++        if (mode == AppMode.Sqlite)
++        {
++            // Sqlite mode reuses the Azure Blob settings from cloud mode but stores
++            // activity counters and the gallery/screenshot index in a SQLite file.
++            config.SqliteDbPath = EnvOr("SQLITE_DB_PATH", "communityhub.db");
++
++            config.Tenant = Environment.GetEnvironmentVariable("APP_TENANT") ?? "";
++            if (!TenantRegex().IsMatch(config.Tenant))
++                throw new InvalidOperationException($"APP_TENANT must match ^[a-zA-Z0-9][a-zA-Z0-9-]{{0,30}}$, got '{config.Tenant}'");
++
++            var missingSqlite = new List<string>();
++            config.AzureStorageAccount = RequireEnv("AZURE_STORAGE_ACCOUNT", missingSqlite);
++            config.AzureBlobPublicBase = RequireEnv("AZURE_BLOB_PUBLIC_BASE", missingSqlite);
++            config.AppInsightsConnStr = Environment.GetEnvironmentVariable("APPLICATIONINSIGHTS_CONNECTION_STRING") ?? "";
++            if (missingSqlite.Count > 0)
++                throw new InvalidOperationException($"Required env vars missing in sqlite mode: {string.Join(", ", missingSqlite)}");
++
++            return config;
++        }
++
+         // Cloud mode
+         config.Tenant = Environment.GetEnvironmentVariable("APP_TENANT") ?? "";
+         if (!TenantRegex().IsMatch(config.Tenant))
+diff --git a/src/community-hub/CommunityHub/Extensions/ServiceCollectionExtensions.cs b/src/community-hub/CommunityHub/Extensions/ServiceCollectionExtensions.cs
+index e39118e..2ac5246 100644
+--- a/src/community-hub/CommunityHub/Extensions/ServiceCollectionExtensions.cs
++++ b/src/community-hub/CommunityHub/Extensions/ServiceCollectionExtensions.cs
+@@ -43,6 +43,25 @@ public static class ServiceCollectionExtensions
+                 builder.Services.AddSingleton<IDebugDataCleaner>(new LocalDebugDataCleaner(localMetrics, localGallery, localBlobs));
+                 break;
+ 
++            case AppMode.Sqlite:
++                Console.WriteLine($"Starting in SQLITE mode (tenant: {cfg.Tenant}, commit: {AppVersion})");
++                Console.WriteLine($"  SQLite DB:        {cfg.SqliteDbPath}");
++                Console.WriteLine($"  Storage Account:  {cfg.AzureStorageAccount}");
++
++                var sqliteConnStr = SqliteDb.BuildConnectionString(cfg.SqliteDbPath);
++                await SqliteDb.BootstrapAsync(sqliteConnStr);
++
++                var sqliteBlobs = new AzureBlobStoreSqlite(cfg.AzureStorageAccount, cfg.Tenant, cfg.AzureBlobPublicBase, sqliteConnStr);
++                var sqliteMetrics = new SqliteMetrics(sqliteConnStr, cfg.Tenant);
++                var sqliteGallery = new SqliteGalleryIndex(sqliteConnStr, cfg.Tenant);
++
++                builder.Services.AddSingleton<IBlobStore>(sqliteBlobs);
++                builder.Services.AddSingleton<IGalleryIndex>(sqliteGallery);
++                builder.Services.AddSingleton<IMetricsStore>(sqliteMetrics);
++                builder.Services.AddSingleton<IDebugSqlDumper, NoSqlDebugDumper>();
++                builder.Services.AddSingleton<IDebugDataCleaner>(new SqliteDebugDataCleaner(sqliteConnStr, cfg.Tenant, sqliteBlobs));
++                break;
++
+             case AppMode.Cloud:
+                 Console.WriteLine($"Starting in CLOUD mode (tenant: {cfg.Tenant}, commit: {AppVersion})");
+                 Console.WriteLine($"  SQL Server:       {cfg.SqlServer}");
+diff --git a/src/community-hub/CommunityHub/Services/AzureBlobStoreSqlite.cs b/src/community-hub/CommunityHub/Services/AzureBlobStoreSqlite.cs
+new file mode 100644
+index 0000000..71df834
+--- /dev/null
++++ b/src/community-hub/CommunityHub/Services/AzureBlobStoreSqlite.cs
+@@ -0,0 +1,147 @@
++using Azure.Identity;
++using Azure.Storage.Blobs;
++using Azure.Storage.Blobs.Models;
++using Microsoft.Data.Sqlite;
++
++namespace CommunityHub.Services;
++
++/// <summary>
++/// Blob store that uploads screenshots and game HTML to Azure Blob Storage (identical
++/// to <see cref="AzureBlobStore"/>) but records the screenshot index in a local SQLite
++/// database instead of Azure SQL. Used by the <c>sqlite</c> app mode.
++/// </summary>
++public class AzureBlobStoreSqlite : IBlobStore
++{
++    private readonly BlobServiceClient _client;
++    private readonly string _tenant;
++    private readonly string _publicBase;
++    private readonly string _sqliteConnectionString;
++
++    public string CurrentTenant => _tenant;
++    public bool IsLocalServing => false;
++
++    public AzureBlobStoreSqlite(string account, string tenant, string publicBase, string sqliteConnectionString)
++    {
++        _tenant = tenant;
++        _publicBase = publicBase;
++        _sqliteConnectionString = sqliteConnectionString;
++        var serviceUrl = new Uri($"https://{account}.blob.core.windows.net");
++        _client = new BlobServiceClient(serviceUrl, new DefaultAzureCredential());
++    }
++
++    private async Task<SqliteConnection> OpenAsync()
++    {
++        var db = SqliteDb.CreateConnection(_sqliteConnectionString);
++        await db.OpenAsync();
++        using (var pragma = db.CreateCommand())
++        {
++            pragma.CommandText = "PRAGMA busy_timeout=5000;";
++            await pragma.ExecuteNonQueryAsync();
++        }
++        return db;
++    }
++
++    public async Task<string> PutScreenshotAsync(string name, Stream data, string contentType, string? tenant = null)
++    {
++        var container = _client.GetBlobContainerClient("screenshots");
++        var selectedTenant = TenantOrDefault(tenant);
++        var blobName = $"{selectedTenant.ToLowerInvariant()}/{name}";
++        var blobClient = container.GetBlobClient(blobName);
++
++        var headers = new BlobHttpHeaders
++        {
++            ContentType = contentType,
++            CacheControl = "public, max-age=31536000, immutable"
++        };
++
++        await blobClient.UploadAsync(data, new BlobUploadOptions { HttpHeaders = headers });
++        var blobUrl = $"{_publicBase}/screenshots/{blobName}";
++
++        using var db = await OpenAsync();
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = "INSERT INTO screenshots (tenant, blob_url) VALUES ($t, $u)";
++        cmd.Parameters.AddWithValue("$t", selectedTenant);
++        cmd.Parameters.AddWithValue("$u", blobUrl);
++        await cmd.ExecuteNonQueryAsync();
++
++        return blobUrl;
++    }
++
++    public async Task<string> PutGalleryHtmlAsync(string name, byte[] data, string? tenant = null)
++    {
++        var container = _client.GetBlobContainerClient("gallery");
++        var selectedTenant = TenantOrDefault(tenant);
++        var blobName = $"{selectedTenant.ToLowerInvariant()}/{name}";
++        var blobClient = container.GetBlobClient(blobName);
++
++        var headers = new BlobHttpHeaders
++        {
++            ContentType = "text/html; charset=utf-8",
++            CacheControl = "public, max-age=300"
++        };
++
++        using var stream = new MemoryStream(data);
++        await blobClient.UploadAsync(stream, new BlobUploadOptions { HttpHeaders = headers });
++        return $"{_publicBase}/gallery/{blobName}";
++    }
++
++    public async Task<List<string>> ListScreenshotsAsync(string? tenant = null)
++    {
++        using var db = await OpenAsync();
++        var selectedTenant = TenantOrDefault(tenant);
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = "SELECT blob_url FROM screenshots WHERE tenant = $t ORDER BY uploaded_at DESC, id DESC";
++        cmd.Parameters.AddWithValue("$t", selectedTenant);
++
++        var urls = new List<string>();
++        using var reader = await cmd.ExecuteReaderAsync();
++        while (await reader.ReadAsync())
++            urls.Add(reader.GetString(0));
++        return urls;
++    }
++
++    public async Task<List<string>> ListTenantsAsync()
++    {
++        using var db = await OpenAsync();
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = "SELECT DISTINCT tenant FROM screenshots ORDER BY tenant";
++        var results = new List<string>();
++        using var reader = await cmd.ExecuteReaderAsync();
++        while (await reader.ReadAsync())
++            results.Add(reader.GetString(0));
++        results.RemoveAll(t => string.Equals(t, CurrentTenant, StringComparison.OrdinalIgnoreCase));
++        results.Insert(0, CurrentTenant);
++        return results;
++    }
++
++    public string ServeGalleryHtml(string name, string? tenant = null) =>
++        $"{_publicBase}/gallery/{TenantOrDefault(tenant).ToLowerInvariant()}/{name}";
++
++    public async Task DeleteTenantFilesAsync(string tenant)
++    {
++        await DeleteContainerBlobsAsync("screenshots", tenant);
++        await DeleteContainerBlobsAsync("gallery", tenant);
++    }
++
++    public async Task DeleteAllFilesAsync()
++    {
++        await DeleteContainerBlobsAsync("screenshots", null);
++        await DeleteContainerBlobsAsync("gallery", null);
++    }
++
++    private string TenantOrDefault(string? requestedTenant)
++    {
++        if (!TenantHelpers.IsValidTenant(requestedTenant))
++            throw new ArgumentException("Invalid tenant", nameof(requestedTenant));
++        return string.IsNullOrWhiteSpace(requestedTenant) ? CurrentTenant : requestedTenant;
++    }
++
++    private async Task DeleteContainerBlobsAsync(string containerName, string? tenant)
++    {
++        var container = _client.GetBlobContainerClient(containerName);
++        var prefix = string.IsNullOrWhiteSpace(tenant) ? null : tenant.ToLowerInvariant() + "/";
++
++        await foreach (var blob in container.GetBlobsAsync(BlobTraits.None, BlobStates.None, prefix, CancellationToken.None))
++            await container.DeleteBlobIfExistsAsync(blob.Name);
++    }
++}
+diff --git a/src/community-hub/CommunityHub/Services/SqliteDb.cs b/src/community-hub/CommunityHub/Services/SqliteDb.cs
+new file mode 100644
+index 0000000..aff0ae7
+--- /dev/null
++++ b/src/community-hub/CommunityHub/Services/SqliteDb.cs
+@@ -0,0 +1,138 @@
++using Microsoft.Data.Sqlite;
++
++namespace CommunityHub.Services;
++
++/// <summary>
++/// SQLite-backed schema bootstrap and connection factory.
++/// Mirrors <see cref="MssqlDb"/> but targets a local SQLite database file so the
++/// Community Hub can run on Azure App Service using Blob Storage for files and a
++/// SQLite file (on the persistent /home volume) for activity counters and the
++/// gallery/screenshot index -- without provisioning Azure SQL.
++/// </summary>
++public static class SqliteDb
++{
++    private const string CreateSessionsTable = """
++        CREATE TABLE IF NOT EXISTS sessions (
++            id         INTEGER PRIMARY KEY AUTOINCREMENT,
++            tenant     TEXT NOT NULL COLLATE NOCASE,
++            session_id TEXT NOT NULL,
++            user_info  TEXT NOT NULL DEFAULT '',
++            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
++        );
++        """;
++
++    private const string CreateSessionsIndexes = """
++        CREATE INDEX IF NOT EXISTS idx_sessions_tenant ON sessions (tenant);
++        CREATE INDEX IF NOT EXISTS idx_sessions_tenant_session_id ON sessions (tenant, session_id);
++        CREATE INDEX IF NOT EXISTS idx_sessions_tenant_user_info ON sessions (tenant, user_info);
++        """;
++
++    private const string CreateToolCountsTable = """
++        CREATE TABLE IF NOT EXISTS tool_counts (
++            tenant    TEXT NOT NULL COLLATE NOCASE,
++            tool_name TEXT NOT NULL,
++            count     INTEGER NOT NULL DEFAULT 0,
++            PRIMARY KEY (tenant, tool_name)
++        );
++        """;
++
++    private const string CreateCountersTable = """
++        CREATE TABLE IF NOT EXISTS counters (
++            tenant  TEXT NOT NULL COLLATE NOCASE,
++            name    TEXT NOT NULL,
++            value   INTEGER NOT NULL DEFAULT 0,
++            PRIMARY KEY (tenant, name)
++        );
++        """;
++
++    private const string CreateGalleryTable = """
++        CREATE TABLE IF NOT EXISTS gallery (
++            id          INTEGER PRIMARY KEY AUTOINCREMENT,
++            tenant      TEXT NOT NULL COLLATE NOCASE,
++            name        TEXT NOT NULL,
++            filename    TEXT NOT NULL,
++            blob_url    TEXT NOT NULL,
++            uploaded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
++        );
++        """;
++
++    private const string CreateGalleryIndex = """
++        CREATE INDEX IF NOT EXISTS idx_gallery_tenant ON gallery (tenant);
++        CREATE INDEX IF NOT EXISTS idx_gallery_tenant_uploaded_at ON gallery (tenant, uploaded_at, id);
++        """;
++
++    private const string CreateScreenshotsTable = """
++        CREATE TABLE IF NOT EXISTS screenshots (
++            id          INTEGER PRIMARY KEY AUTOINCREMENT,
++            tenant      TEXT NOT NULL COLLATE NOCASE,
++            blob_url    TEXT NOT NULL,
++            uploaded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
++        );
++        """;
++
++    private const string CreateScreenshotsIndex = """
++        CREATE INDEX IF NOT EXISTS idx_screenshots_tenant ON screenshots (tenant);
++        """;
++
++    private static readonly string[] SchemaBatches =
++    [
++        CreateSessionsTable,
++        CreateSessionsIndexes,
++        CreateToolCountsTable,
++        CreateCountersTable,
++        CreateGalleryTable,
++        CreateGalleryIndex,
++        CreateScreenshotsTable,
++        CreateScreenshotsIndex,
++    ];
++
++    public static IReadOnlyList<string> KnownTableNames { get; } =
++    [
++        "sessions",
++        "tool_counts",
++        "counters",
++        "gallery",
++        "screenshots",
++    ];
++
++    public static string BuildConnectionString(string dbPath)
++    {
++        var builder = new SqliteConnectionStringBuilder
++        {
++            DataSource = dbPath,
++            Mode = SqliteOpenMode.ReadWriteCreate,
++            Cache = SqliteCacheMode.Shared,
++            Pooling = true
++        };
++        return builder.ConnectionString;
++    }
++
++    public static SqliteConnection CreateConnection(string connectionString)
++    {
++        return new SqliteConnection(connectionString);
++    }
++
++    public static async Task BootstrapAsync(string connectionString)
++    {
++        var dataSource = new SqliteConnectionStringBuilder(connectionString).DataSource;
++        var dir = Path.GetDirectoryName(Path.GetFullPath(dataSource));
++        if (!string.IsNullOrEmpty(dir))
++            Directory.CreateDirectory(dir);
++
++        using var conn = CreateConnection(connectionString);
++        await conn.OpenAsync();
++
++        using (var pragma = conn.CreateCommand())
++        {
++            pragma.CommandText = "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;";
++            await pragma.ExecuteNonQueryAsync();
++        }
++
++        foreach (var batch in SchemaBatches)
++        {
++            using var cmd = conn.CreateCommand();
++            cmd.CommandText = batch.Trim();
++            await cmd.ExecuteNonQueryAsync();
++        }
++    }
++}
+diff --git a/src/community-hub/CommunityHub/Services/SqliteDebugDataCleaner.cs b/src/community-hub/CommunityHub/Services/SqliteDebugDataCleaner.cs
+new file mode 100644
+index 0000000..5b38fe2
+--- /dev/null
++++ b/src/community-hub/CommunityHub/Services/SqliteDebugDataCleaner.cs
+@@ -0,0 +1,94 @@
++using Microsoft.Data.Sqlite;
++
++namespace CommunityHub.Services;
++
++/// <summary>
++/// SQLite port of <see cref="SqlDebugDataCleaner"/>. Clears tenant data from the
++/// SQLite tables and deletes the corresponding blobs.
++/// </summary>
++public sealed class SqliteDebugDataCleaner(string connectionString, string currentTenant, AzureBlobStoreSqlite blobs) : IDebugDataCleaner
++{
++    public string CurrentTenant => currentTenant;
++
++    private async Task<SqliteConnection> OpenAsync()
++    {
++        var db = SqliteDb.CreateConnection(connectionString);
++        await db.OpenAsync();
++        using (var pragma = db.CreateCommand())
++        {
++            pragma.CommandText = "PRAGMA busy_timeout=5000;";
++            await pragma.ExecuteNonQueryAsync();
++        }
++        return db;
++    }
++
++    public async Task<List<string>> ListTenantsAsync()
++    {
++        using var db = await OpenAsync();
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = """
++            SELECT tenant FROM sessions
++            UNION SELECT tenant FROM counters
++            UNION SELECT tenant FROM tool_counts
++            UNION SELECT tenant FROM gallery
++            UNION SELECT tenant FROM screenshots
++            ORDER BY tenant
++            """;
++        var tenants = new List<string>();
++        using var reader = await cmd.ExecuteReaderAsync();
++        while (await reader.ReadAsync())
++            tenants.Add(reader.GetString(0));
++        tenants.RemoveAll(t => string.Equals(t, CurrentTenant, StringComparison.OrdinalIgnoreCase));
++        tenants.Insert(0, CurrentTenant);
++        return tenants;
++    }
++
++    public async Task DeleteTenantAsync(string tenant)
++    {
++        if (string.IsNullOrWhiteSpace(tenant) || !TenantHelpers.IsValidTenant(tenant))
++            throw new ArgumentException("Invalid tenant.", nameof(tenant));
++
++        using (var db = await OpenAsync())
++        using (var tx = (SqliteTransaction)await db.BeginTransactionAsync())
++        {
++            foreach (var (tenantSql, _) in DeleteStatements)
++            {
++                using var cmd = db.CreateCommand();
++                cmd.Transaction = tx;
++                cmd.CommandText = tenantSql;
++                cmd.Parameters.AddWithValue("$tenant", tenant);
++                await cmd.ExecuteNonQueryAsync();
++            }
++            await tx.CommitAsync();
++        }
++
++        await blobs.DeleteTenantFilesAsync(tenant);
++    }
++
++    public async Task DeleteAllAsync()
++    {
++        using (var db = await OpenAsync())
++        using (var tx = (SqliteTransaction)await db.BeginTransactionAsync())
++        {
++            foreach (var (_, allSql) in DeleteStatements)
++            {
++                using var cmd = db.CreateCommand();
++                cmd.Transaction = tx;
++                cmd.CommandText = allSql;
++                await cmd.ExecuteNonQueryAsync();
++            }
++            await tx.CommitAsync();
++        }
++
++        await blobs.DeleteAllFilesAsync();
++    }
++
++    private static readonly (string TenantSql, string AllSql)[] DeleteStatements =
++    [
++        ("DELETE FROM sessions WHERE tenant = $tenant", "DELETE FROM sessions"),
++        ("DELETE FROM counters WHERE tenant = $tenant", "DELETE FROM counters"),
++        ("DELETE FROM tool_counts WHERE tenant = $tenant", "DELETE FROM tool_counts"),
++        ("DELETE FROM gallery WHERE tenant = $tenant", "DELETE FROM gallery"),
++        ("DELETE FROM screenshots WHERE tenant = $tenant", "DELETE FROM screenshots")
++    ];
++}
+diff --git a/src/community-hub/CommunityHub/Services/SqliteGalleryIndex.cs b/src/community-hub/CommunityHub/Services/SqliteGalleryIndex.cs
+new file mode 100644
+index 0000000..c9538cb
+--- /dev/null
++++ b/src/community-hub/CommunityHub/Services/SqliteGalleryIndex.cs
+@@ -0,0 +1,121 @@
++using CommunityHub.Models;
++using Microsoft.Data.Sqlite;
++
++namespace CommunityHub.Services;
++
++/// <summary>
++/// SQLite port of <see cref="SqlGalleryIndex"/>. Stores the gallery index rows in a
++/// local SQLite file; the actual game HTML still lives in Azure Blob Storage.
++/// </summary>
++public class SqliteGalleryIndex(string connectionString, string tenant) : IGalleryIndex
++{
++    public string CurrentTenant => tenant;
++
++    private async Task<SqliteConnection> OpenAsync()
++    {
++        var db = SqliteDb.CreateConnection(connectionString);
++        await db.OpenAsync();
++        using (var pragma = db.CreateCommand())
++        {
++            pragma.CommandText = "PRAGMA busy_timeout=5000;";
++            await pragma.ExecuteNonQueryAsync();
++        }
++        return db;
++    }
++
++    public async Task AddAsync(GalleryEntry entry, string? requestedTenant = null)
++    {
++        using var db = await OpenAsync();
++        var selectedTenant = TenantOrDefault(requestedTenant);
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = "INSERT INTO gallery (tenant, name, filename, blob_url) VALUES ($t, $n, $f, $u)";
++        cmd.Parameters.AddWithValue("$t", selectedTenant);
++        cmd.Parameters.AddWithValue("$n", entry.Name);
++        cmd.Parameters.AddWithValue("$f", entry.Filename);
++        cmd.Parameters.AddWithValue("$u", entry.Url ?? "");
++        await cmd.ExecuteNonQueryAsync();
++    }
++
++    public async Task<List<GalleryEntry>> ListAsync(int? limit = null, string? requestedTenant = null)
++    {
++        using var db = await OpenAsync();
++        var selectedTenant = TenantOrDefault(requestedTenant);
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = limit is > 0
++            ? "SELECT name, filename, blob_url FROM gallery WHERE tenant = $t ORDER BY uploaded_at DESC, id DESC LIMIT $lim"
++            : "SELECT name, filename, blob_url FROM gallery WHERE tenant = $t ORDER BY uploaded_at DESC, id DESC";
++        cmd.Parameters.AddWithValue("$t", selectedTenant);
++        if (limit is > 0)
++            cmd.Parameters.AddWithValue("$lim", limit.Value);
++
++        var entries = new List<GalleryEntry>();
++        using var reader = await cmd.ExecuteReaderAsync();
++        while (await reader.ReadAsync())
++        {
++            var entry = new GalleryEntry
++            {
++                Name = reader.GetString(0),
++                Filename = reader.GetString(1)
++            };
++            var blobUrl = reader.GetString(2);
++            if (!string.IsNullOrEmpty(blobUrl))
++                entry.Url = blobUrl;
++            entries.Add(entry);
++        }
++        return entries;
++    }
++
++    public async Task<int> CountAsync(string? requestedTenant = null)
++    {
++        using var db = await OpenAsync();
++        var selectedTenant = TenantOrDefault(requestedTenant);
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = "SELECT COUNT(*) FROM gallery WHERE tenant = $t";
++        cmd.Parameters.AddWithValue("$t", selectedTenant);
++        var result = await cmd.ExecuteScalarAsync();
++        return result is null ? 0 : (int)(long)result;
++    }
++
++    public async Task<(int Tenant, int AllTenants)> CountWithAllTenantsAsync(string? requestedTenant = null)
++    {
++        using var db = await OpenAsync();
++        var selectedTenant = TenantOrDefault(requestedTenant);
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = """
++            SELECT
++                SUM(CASE WHEN tenant = $t THEN 1 ELSE 0 END),
++                COUNT(*)
++            FROM gallery
++            """;
++        cmd.Parameters.AddWithValue("$t", selectedTenant);
++        using var reader = await cmd.ExecuteReaderAsync();
++        if (await reader.ReadAsync())
++        {
++            var tenantCount = reader.IsDBNull(0) ? 0 : (int)reader.GetInt64(0);
++            var allTenantsCount = reader.IsDBNull(1) ? 0 : (int)reader.GetInt64(1);
++            return (tenantCount, allTenantsCount);
++        }
++        return (0, 0);
++    }
++
++    public async Task<List<string>> ListTenantsAsync()
++    {
++        using var db = await OpenAsync();
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = "SELECT DISTINCT tenant FROM gallery ORDER BY tenant";
++        var results = new List<string>();
++        using var reader = await cmd.ExecuteReaderAsync();
++        while (await reader.ReadAsync())
++            results.Add(reader.GetString(0));
++        results.RemoveAll(t => string.Equals(t, CurrentTenant, StringComparison.OrdinalIgnoreCase));
++        results.Insert(0, CurrentTenant);
++        return results;
++    }
++
++    private string TenantOrDefault(string? requestedTenant)
++    {
++        if (!TenantHelpers.IsValidTenant(requestedTenant))
++            throw new ArgumentException("Invalid tenant", nameof(requestedTenant));
++        return string.IsNullOrWhiteSpace(requestedTenant) ? CurrentTenant : requestedTenant;
++    }
++}
+diff --git a/src/community-hub/CommunityHub/Services/SqliteMetrics.cs b/src/community-hub/CommunityHub/Services/SqliteMetrics.cs
+new file mode 100644
+index 0000000..1758b28
+--- /dev/null
++++ b/src/community-hub/CommunityHub/Services/SqliteMetrics.cs
+@@ -0,0 +1,221 @@
++using CommunityHub.Models;
++using Microsoft.Data.Sqlite;
++
++namespace CommunityHub.Services;
++
++/// <summary>
++/// SQLite port of <see cref="SqlMetrics"/>. Same IMetricsStore behavior, backed by
++/// a local SQLite database file instead of Azure SQL.
++/// </summary>
++public class SqliteMetrics(string connectionString, string tenant) : IMetricsStore
++{
++    public string CurrentTenant => tenant;
++
++    private async Task<SqliteConnection> OpenAsync()
++    {
++        var db = SqliteDb.CreateConnection(connectionString);
++        await db.OpenAsync();
++        using (var pragma = db.CreateCommand())
++        {
++            pragma.CommandText = "PRAGMA busy_timeout=5000;";
++            await pragma.ExecuteNonQueryAsync();
++        }
++        return db;
++    }
++
++    public async Task OnSessionStartAsync(string sessionId, string userId)
++    {
++        if (string.IsNullOrEmpty(sessionId))
++            return;
++        using var db = await OpenAsync();
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = "INSERT INTO sessions (tenant, session_id, user_info) VALUES ($t, $s, $u)";
++        cmd.Parameters.AddWithValue("$t", tenant);
++        cmd.Parameters.AddWithValue("$s", sessionId);
++        cmd.Parameters.AddWithValue("$u", userId ?? "");
++        await cmd.ExecuteNonQueryAsync();
++    }
++
++    public async Task OnToolUsedAsync(string tool)
++    {
++        if (string.IsNullOrEmpty(tool))
++            return;
++        using var db = await OpenAsync();
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = """
++            INSERT INTO tool_counts (tenant, tool_name, count) VALUES ($t, $n, 1)
++            ON CONFLICT(tenant, tool_name) DO UPDATE SET count = count + 1
++            """;
++        cmd.Parameters.AddWithValue("$t", tenant);
++        cmd.Parameters.AddWithValue("$n", tool);
++        await cmd.ExecuteNonQueryAsync();
++    }
++
++    public Task OnPromptSubmittedAsync() => IncrementCounterAsync("prompt_submissions");
++    public Task OnSubagentStopAsync() => IncrementCounterAsync("subagent_stops");
++    public Task OnAgentStopAsync() => IncrementCounterAsync("agent_stops");
++
++    private async Task IncrementCounterAsync(string name)
++    {
++        using var db = await OpenAsync();
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = """
++            INSERT INTO counters (tenant, name, value) VALUES ($t, $n, 1)
++            ON CONFLICT(tenant, name) DO UPDATE SET value = value + 1
++            """;
++        cmd.Parameters.AddWithValue("$t", tenant);
++        cmd.Parameters.AddWithValue("$n", name);
++        await cmd.ExecuteNonQueryAsync();
++    }
++
++    public async Task<ActivitySnapshot> SnapshotAsync(string? requestedTenant = null)
++    {
++        var (tenantSnap, _) = await SnapshotWithAllTenantsAsync(requestedTenant);
++        return tenantSnap;
++    }
++
++    public async Task<ActivitySnapshot> AllTenantsSnapshotAsync()
++    {
++        var (_, allSnap) = await SnapshotWithAllTenantsAsync();
++        return allSnap;
++    }
++
++    public async Task<(ActivitySnapshot Tenant, ActivitySnapshot AllTenants)> SnapshotWithAllTenantsAsync(string? requestedTenant = null)
++    {
++        var selectedTenant = TenantOrDefault(requestedTenant);
++        using var db = await OpenAsync();
++
++        var (tSessions, tUsers, aSessions, aUsers) = await GetCombinedSessionCountsAsync(db, selectedTenant);
++        var (tCounters, aCounters) = await GetCombinedCountersAsync(db, selectedTenant);
++        var (tTools, aTools) = await GetCombinedToolBreakdownAsync(db, selectedTenant);
++
++        var tenantSnap = BuildSnapshot(tSessions, tUsers, tCounters, tTools);
++        var allSnap = BuildSnapshot(aSessions, aUsers, aCounters, aTools);
++        return (tenantSnap, allSnap);
++    }
++
++    private static ActivitySnapshot BuildSnapshot(
++        int sessionCount, int userCount,
++        List<(string Name, int Value)> counters,
++        List<ToolCount> toolBreakdown)
++    {
++        var snap = new ActivitySnapshot
++        {
++            SessionCount = sessionCount,
++            UserCount = userCount
++        };
++
++        foreach (var (name, value) in counters)
++        {
++            switch (name)
++            {
++                case "prompt_submissions": snap.PromptSubmissions = value; break;
++                case "agent_stops": snap.AgentStops = value; break;
++                case "subagent_stops": snap.SubagentStops = value; break;
++            }
++        }
++
++        snap.ToolBreakdown = toolBreakdown
++            .OrderByDescending(tc => tc.Count)
++            .ThenBy(tc => tc.Name)
++            .ToList();
++        snap.ToolCalls = snap.ToolBreakdown.Sum(tc => tc.Count);
++        return snap;
++    }
++
++    public async Task<List<string>> ListTenantsAsync()
++    {
++        using var db = await OpenAsync();
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = """
++            SELECT tenant FROM sessions
++            UNION SELECT tenant FROM counters
++            UNION SELECT tenant FROM tool_counts
++            UNION SELECT tenant FROM gallery
++            ORDER BY tenant
++            """;
++        var results = new List<string>();
++        using var reader = await cmd.ExecuteReaderAsync();
++        while (await reader.ReadAsync())
++            results.Add(reader.GetString(0));
++        results.RemoveAll(t => string.Equals(t, CurrentTenant, StringComparison.OrdinalIgnoreCase));
++        results.Insert(0, CurrentTenant);
++        return results;
++    }
++
++    private static async Task<(int TenantSessions, int TenantUsers, int AllSessions, int AllUsers)> GetCombinedSessionCountsAsync(SqliteConnection db, string selectedTenant)
++    {
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = """
++            SELECT
++                (SELECT COUNT(DISTINCT session_id) FROM sessions WHERE tenant = $t),
++                (SELECT COUNT(DISTINCT user_info) FROM sessions WHERE tenant = $t AND user_info <> ''),
++                (SELECT COUNT(*) FROM (SELECT 1 FROM sessions GROUP BY tenant, session_id)),
++                (SELECT COUNT(*) FROM (SELECT 1 FROM sessions WHERE user_info <> '' GROUP BY tenant, user_info))
++            """;
++        cmd.Parameters.AddWithValue("$t", selectedTenant);
++        using var reader = await cmd.ExecuteReaderAsync();
++        if (await reader.ReadAsync())
++        {
++            return (
++                reader.IsDBNull(0) ? 0 : (int)reader.GetInt64(0),
++                reader.IsDBNull(1) ? 0 : (int)reader.GetInt64(1),
++                reader.IsDBNull(2) ? 0 : (int)reader.GetInt64(2),
++                reader.IsDBNull(3) ? 0 : (int)reader.GetInt64(3)
++            );
++        }
++        return (0, 0, 0, 0);
++    }
++
++    private static async Task<(List<(string Name, int Value)> Tenant, List<(string Name, int Value)> All)> GetCombinedCountersAsync(SqliteConnection db, string selectedTenant)
++    {
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = """
++            SELECT name,
++                   SUM(CASE WHEN tenant = $t THEN value ELSE 0 END),
++                   SUM(value)
++            FROM counters
++            GROUP BY name
++            """;
++        cmd.Parameters.AddWithValue("$t", selectedTenant);
++        var tenantCounters = new List<(string, int)>();
++        var allCounters = new List<(string, int)>();
++        using var reader = await cmd.ExecuteReaderAsync();
++        while (await reader.ReadAsync())
++        {
++            var name = reader.GetString(0);
++            tenantCounters.Add((name, reader.IsDBNull(1) ? 0 : (int)reader.GetInt64(1)));
++            allCounters.Add((name, reader.IsDBNull(2) ? 0 : (int)reader.GetInt64(2)));
++        }
++        return (tenantCounters, allCounters);
++    }
++
++    private static async Task<(List<ToolCount> Tenant, List<ToolCount> All)> GetCombinedToolBreakdownAsync(SqliteConnection db, string selectedTenant)
++    {
++        using var cmd = db.CreateCommand();
++        cmd.CommandText = """
++            SELECT tool_name,
++                   SUM(CASE WHEN tenant = $t THEN count ELSE 0 END),
++                   SUM(count)
++            FROM tool_counts
++            GROUP BY tool_name
++            """;
++        cmd.Parameters.AddWithValue("$t", selectedTenant);
++        var tenantTools = new List<ToolCount>();
++        var allTools = new List<ToolCount>();
++        using var reader = await cmd.ExecuteReaderAsync();
++        while (await reader.ReadAsync())
++        {
++            var toolName = reader.GetString(0);
++            var tenantCount = reader.IsDBNull(1) ? 0 : (int)reader.GetInt64(1);
++            var allCount = reader.IsDBNull(2) ? 0 : (int)reader.GetInt64(2);
++            if (tenantCount > 0)
++                tenantTools.Add(new ToolCount { Name = toolName, Count = tenantCount });
++            allTools.Add(new ToolCount { Name = toolName, Count = allCount });
++        }
++        return (tenantTools, allTools);
++    }
++
++    private string TenantOrDefault(string? requestedTenant) =>
++        string.IsNullOrWhiteSpace(requestedTenant) ? CurrentTenant : requestedTenant;
++}

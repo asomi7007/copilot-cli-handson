@@ -1,0 +1,36 @@
+{
+  "name": "LAB502 — GitHub Copilot Hands-on",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
+    },
+    "ghcr.io/devcontainers/features/dotnet:2": {
+      "version": "10.0",
+      "installUsingApt": false
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "GitHub.copilot",
+        "GitHub.copilot-chat"
+      ]
+    }
+  },
+
+  "onCreateCommand": "bash .devcontainer/setup.sh",
+
+  "forwardPorts": [1345, 5119, 8080],
+  "portsAttributes": {
+    "1345": { "label": "Community Hub", "onAutoForward": "silent" },
+    "5119": { "label": "Community Hub (alt)", "onAutoForward": "silent" }
+  },
+
+  "remoteEnv": {
+    "PLAYWRIGHT_BROWSERS_PATH": "/home/vscode/.cache/ms-playwright"
+  }
+}

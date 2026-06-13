@@ -1,0 +1,425 @@
+@page "/activity"
+@using CommunityHub.Models
+@using System.Text.Json
+@model CommunityHub.Pages.ActivityModel
+@{
+    Layout = null;
+}
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Microsoft Build 2026 - Lab 502 Live Activity Board</title>
+    <link rel="stylesheet" href="/css/dashboard.css" />
+</head>
+<body>
+	<header class="brand-bar">
+		<span class="ms-logo" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+		<span class="brand-text">Microsoft Build</span>
+		<span class="brand-copilot" title="Powered by GitHub Copilot">
+			<span class="copilot-mark" aria-hidden="true">@Html.Raw(ActivityModel.CopilotIcon)</span>
+			<span>GitHub Copilot</span>
+		</span>
+		<span class="brand-section">/ Lab 502 · Live Activity Board</span>
+		<form class="tenant-picker" method="get">
+			<label for="tenant-select">Tenant</label>
+			<select id="tenant-select" name="tenant" onchange="this.form.submit()">
+				@foreach (var tenant in Model.TenantOptions)
+				{
+					if (tenant == Model.SelectedTenant)
+					{
+						<option value="@tenant" selected>@tenant</option>
+					}
+					else
+					{
+						<option value="@tenant">@tenant</option>
+					}
+				}
+			</select>
+		</form>
+		<span id="telemetry-status" class="brand-pill">Live Telemetry</span>
+		<span id="refresh-countdown" class="refresh-countdown">Refresh in 3s</span>
+	</header>
+	<div class="copilot-stripe" aria-hidden="true"></div>
+	<div class="deco tl" aria-hidden="true">' ' ' '
+' ' ' '
+' ' ' '</div>
+	<div class="deco tr" aria-hidden="true">' ' ' '
+' ' ' '
+' ' ' '</div>
+	<div class="deco bl" aria-hidden="true">' ' ' '
+' ' ' '</div>
+	<div class="deco br" aria-hidden="true">' ' ' '
+' ' ' '</div>
+	<div class="page">
+		<div class="main-card">
+			<div class="main-scroll">
+				<div class="copilot-hero">
+					<div class="hero-text">
+						<div class="pixel-bar" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+						<span class="copilot-tag">
+							<span class="copilot-mark" aria-hidden="true">@Html.Raw(ActivityModel.CopilotIcon)</span>
+							Powered by GitHub Copilot
+						</span>
+						<h1>Now shipping<span class="colon">:</span><br>Live Activity Board</h1>
+						<p class="subtitle">Real-time signals from the Space Invaders community plugin lab</p>
+					</div>
+				</div>
+				<table>
+					<tr><th>Activity</th><th>@Model.SelectedTenant</th><th>All Labs</th></tr>
+					<tr><td>Sessions</td><td id="session-count">@Model.Snapshot.SessionCount</td><td id="all-session-count">@Model.AllTenantsSnapshot.SessionCount</td></tr>
+					<tr><td><strong>Users</strong></td><td id="user-count">@Model.Snapshot.UserCount</td><td id="all-user-count">@Model.AllTenantsSnapshot.UserCount</td></tr>
+					<tr><td><strong>Prompts Submitted</strong></td><td id="prompt-submissions">@Model.Snapshot.PromptSubmissions</td><td id="all-prompt-submissions">@Model.AllTenantsSnapshot.PromptSubmissions</td></tr>
+					<tr><td>Distinct Tools Called</td><td id="distinct-tools-called">@Model.Snapshot.DistinctToolsCalled</td><td id="all-distinct-tools-called">@Model.AllTenantsSnapshot.DistinctToolsCalled</td></tr>
+					<tr><td><strong>Main agent finished</strong></td><td id="agent-stops">@Model.Snapshot.AgentStops</td><td id="all-agent-stops">@Model.AllTenantsSnapshot.AgentStops</td></tr>
+					<tr><td><strong>Uploaded Games</strong></td><td id="uploaded-games-count"><a class="metric-link" href="/gallery?tenant=@Uri.EscapeDataString(Model.SelectedTenant)">@Model.Snapshot.UploadedGames</a></td><td id="all-uploaded-games-count">@Model.AllTenantsSnapshot.UploadedGames</td></tr>
+				</table>
+
+				<table>
+					<thead>
+						<tr><th>Tools</th><th>@Model.SelectedTenant</th><th>All Labs</th></tr>
+					</thead>
+					<tbody id="tool-breakdown-body">
+						@{
+							var selectedTools = Model.Snapshot.ToolBreakdown.ToDictionary(t => t.Name, t => t.Count);
+							var allTools = Model.AllTenantsSnapshot.ToolBreakdown.ToDictionary(t => t.Name, t => t.Count);
+							var toolNames = selectedTools.Keys.Union(allTools.Keys).OrderBy(name => name).ToList();
+						}
+						@if (toolNames.Count > 0)
+						{
+							foreach (var toolName in toolNames)
+							{
+								<tr data-tool-name="@toolName"><td>@toolName</td><td>@(selectedTools.GetValueOrDefault(toolName))</td><td>@(allTools.GetValueOrDefault(toolName))</td></tr>
+							}
+						}
+						else
+						{
+							<tr><td colspan="@ActivityModel.ActivityColumnCount">No tool calls recorded yet.</td></tr>
+						}
+					</tbody>
+				</table>
+			</div>
+		</div>
+
+		<aside class="sidebar-card">
+			<div class="sidebar-header"><a id="screenshots-gallery-link" href="/screenshots?tenant=@Model.SelectedTenant">Screenshots Gallery (@Model.Screenshots.Count)</a></div>
+			<div id="gallery-viewport" class="gallery-viewport">
+				<div id="gallery-list">
+					@if (Model.Screenshots.Count > 0)
+					{
+						foreach (var url in Model.Screenshots)
+						{
+							<div class="shot-card" data-url="@url">
+								<img class="shot-img" src="@url" alt="@url" loading="lazy" />
+							</div>
+						}
+					}
+					else
+					{
+						<div class="muted">No screenshots saved yet.</div>
+					}
+				</div>
+			</div>
+		</aside>
+	</div>
+
+	<script>
+		(function () {
+			const refreshDelaysMs = [3000, 5000, 10000];
+			const apiRoot = "/api";
+			const selectedTenant = @Html.Raw(JsonSerializer.Serialize(Model.SelectedTenant));
+			const galleryViewport = document.getElementById("gallery-viewport");
+			const galleryList = document.getElementById("gallery-list");
+			const screenshotsGalleryLink = document.getElementById("screenshots-gallery-link");
+			const toolBreakdownBody = document.getElementById("tool-breakdown-body");
+			const refreshCountdown = document.getElementById("refresh-countdown");
+			const telemetryStatus = document.getElementById("telemetry-status");
+
+			let renderedScreenshotUrls = new Set(@Html.Raw(JsonSerializer.Serialize(Model.Screenshots)));
+			let galleryFingerprint = Array.from(renderedScreenshotUrls).join("|");
+			let refreshDelayIndex = 0;
+			let refreshTimer = 0;
+			let countdownTimer = 0;
+			let nextRefreshAt = 0;
+
+			function renderMetrics(data) {
+				const currentMetrics = data.activity?.current_tenant || {};
+				const allMetrics = data.activity?.all_tenants || {};
+				updateMetricCell("session-count", currentMetrics.session_count);
+				updateMetricCell("user-count", currentMetrics.user_count);
+				updateMetricCell("prompt-submissions", currentMetrics.prompt_submissions);
+				updateMetricCell("distinct-tools-called", currentMetrics.distinct_tools_called);
+				updateMetricCell("agent-stops", currentMetrics.agent_stops);
+				updateMetricCell("uploaded-games-count", currentMetrics.uploaded_games_count);
+
+				updateMetricCell("all-session-count", allMetrics.session_count ?? 0);
+				updateMetricCell("all-user-count", allMetrics.user_count ?? 0);
+				updateMetricCell("all-prompt-submissions", allMetrics.prompt_submissions ?? 0);
+				updateMetricCell("all-distinct-tools-called", allMetrics.distinct_tools_called ?? 0);
+				updateMetricCell("all-agent-stops", allMetrics.agent_stops ?? 0);
+				updateMetricCell("all-uploaded-games-count", allMetrics.uploaded_games_count ?? 0);
+
+				const currentTools = data.tools?.current_tenant || [];
+				const tenantTools = data.tools?.all_tenants || [];
+				if (!Array.isArray(currentTools) || !Array.isArray(tenantTools)) return;
+
+				const selectedTools = toToolMap(currentTools);
+				const allTools = toToolMap(tenantTools);
+				const previousToolValues = currentToolValues();
+				const toolNames = Array.from(new Set([...selectedTools.keys(), ...allTools.keys()])).sort();
+				if (toolNames.length === 0) {
+					toolBreakdownBody.innerHTML = "<tr><td colspan=\"@ActivityModel.ActivityColumnCount\">No tool calls recorded yet.</td></tr>";
+					return;
+				}
+
+				let html = "";
+				for (const toolName of toolNames) {
+					html += "<tr data-tool-name=\"" + escapeAttribute(toolName) + "\"><td>" + escapeHtml(toolName) + "</td><td>" + String(selectedTools.get(toolName) || 0) + "</td><td>" + String(allTools.get(toolName) || 0) + "</td></tr>";
+				}
+				toolBreakdownBody.innerHTML = html;
+				animateToolChanges(previousToolValues);
+			}
+
+			function updateMetricCell(id, value) {
+				const cell = document.getElementById(id);
+				if (!cell) return;
+
+				const nextValue = Number(value) || 0;
+				const previousValue = Number(cell.textContent || 0);
+				const link = cell.querySelector("a");
+				if (link) {
+					link.textContent = String(nextValue);
+				} else {
+					cell.textContent = String(nextValue);
+				}
+
+				if (Number.isFinite(previousValue) && previousValue !== nextValue) {
+					animateMetricCell(cell);
+				}
+			}
+
+			function animateMetricCell(cell) {
+				cell.classList.remove("metric-changed");
+				void cell.offsetWidth;
+				cell.classList.add("metric-changed");
+			}
+
+			function currentToolValues() {
+				const values = new Map();
+				for (const row of toolBreakdownBody.querySelectorAll("tr[data-tool-name]")) {
+					const name = row.dataset.toolName;
+					const cells = row.querySelectorAll("td");
+					if (!name || cells.length < 3) continue;
+					values.set(name, [Number(cells[1].textContent || 0), Number(cells[2].textContent || 0)]);
+				}
+				return values;
+			}
+
+			function animateToolChanges(previousValues) {
+				for (const row of toolBreakdownBody.querySelectorAll("tr[data-tool-name]")) {
+					const name = row.dataset.toolName;
+					const previous = previousValues.get(name) || [0, 0];
+					const cells = row.querySelectorAll("td");
+					for (let index = 1; index <= 2; index++) {
+						const nextValue = Number(cells[index].textContent || 0);
+						const previousValue = Number(previous[index - 1] || 0);
+						if (nextValue !== previousValue) {
+							animateMetricCell(cells[index]);
+						}
+					}
+				}
+			}
+
+			function renderScreenshots(urls) {
+				if (!Array.isArray(urls)) return;
+				updateScreenshotsGalleryCount(urls.length);
+				const fingerprint = urls.join("|");
+				if (fingerprint === galleryFingerprint) return;
+
+				const oldScroll = galleryViewport.scrollTop;
+				galleryFingerprint = fingerprint;
+
+				if (urls.length === 0) {
+					galleryList.innerHTML = "<div class=\"muted\">No screenshots saved yet.</div>";
+					galleryViewport.scrollTop = 0;
+					renderedScreenshotUrls = new Set();
+					return;
+				}
+
+				const nextUrls = new Set(urls);
+				for (const card of galleryList.querySelectorAll(".shot-card")) {
+					if (!nextUrls.has(card.dataset.url)) {
+						card.remove();
+					}
+				}
+				const emptyState = galleryList.querySelector(".muted");
+				if (emptyState) {
+					emptyState.remove();
+				}
+				for (const url of urls) {
+					if (renderedScreenshotUrls.has(url)) continue;
+
+					const card = document.createElement("div");
+					card.className = "shot-card";
+					card.dataset.url = url;
+
+					const img = document.createElement("img");
+					img.className = "shot-img";
+					img.src = url;
+					img.alt = url;
+					img.loading = "lazy";
+					card.appendChild(img);
+					galleryList.appendChild(card);
+				}
+				renderedScreenshotUrls = nextUrls;
+
+				const maxScroll = Math.max(0, galleryViewport.scrollHeight - galleryViewport.clientHeight);
+				galleryViewport.scrollTop = Math.min(oldScroll, maxScroll);
+			}
+
+			function updateScreenshotsGalleryCount(count) {
+				if (!screenshotsGalleryLink) return;
+				screenshotsGalleryLink.textContent = "Screenshots Gallery (" + String(Number(count) || 0) + ")";
+			}
+
+			function escapeHtml(value) {
+				return String(value)
+					.replaceAll("&", "&amp;")
+					.replaceAll("<", "&lt;")
+					.replaceAll(">", "&gt;")
+					.replaceAll("\"", "&quot;")
+					.replaceAll("'", "&#39;");
+			}
+
+			function escapeAttribute(value) {
+				return escapeHtml(value).replaceAll("`", "&#96;");
+			}
+
+			function toToolMap(tools) {
+				const map = new Map();
+				if (!Array.isArray(tools)) return map;
+				for (const tool of tools) {
+					if (tool && typeof tool.name === "string") {
+						map.set(tool.name, Number(tool.count) || 0);
+					}
+				}
+				return map;
+			}
+
+			function withTenant(path) {
+				const qs = new URLSearchParams({ tenant: selectedTenant });
+				return path + "?" + qs.toString();
+			}
+
+			function metricsPath() {
+				const qs = new URLSearchParams({ tenant: selectedTenant });
+				return apiRoot + "/activity?" + qs.toString();
+			}
+
+			function metricFingerprint(data) {
+				const currentMetrics = data.activity?.current_tenant || {};
+				const allMetrics = data.activity?.all_tenants || {};
+				return [
+					Number(currentMetrics.session_count) || 0,
+					Number(currentMetrics.user_count) || 0,
+					Number(currentMetrics.prompt_submissions) || 0,
+					Number(currentMetrics.distinct_tools_called) || 0,
+					Number(currentMetrics.agent_stops) || 0,
+					Number(currentMetrics.uploaded_games_count) || 0,
+					Number(allMetrics.session_count) || 0,
+					Number(allMetrics.user_count) || 0,
+					Number(allMetrics.prompt_submissions) || 0,
+					Number(allMetrics.distinct_tools_called) || 0,
+					Number(allMetrics.agent_stops) || 0,
+					Number(allMetrics.uploaded_games_count) || 0
+				].join("|");
+			}
+
+			function currentMetricFingerprint() {
+				return [
+					document.getElementById("session-count")?.textContent || "0",
+					document.getElementById("user-count")?.textContent || "0",
+					document.getElementById("prompt-submissions")?.textContent || "0",
+					document.getElementById("distinct-tools-called")?.textContent || "0",
+					document.getElementById("agent-stops")?.textContent || "0",
+					document.getElementById("uploaded-games-count")?.textContent || "0",
+					document.getElementById("all-session-count")?.textContent || "0",
+					document.getElementById("all-user-count")?.textContent || "0",
+					document.getElementById("all-prompt-submissions")?.textContent || "0",
+					document.getElementById("all-distinct-tools-called")?.textContent || "0",
+					document.getElementById("all-agent-stops")?.textContent || "0",
+					document.getElementById("all-uploaded-games-count")?.textContent || "0"
+				].join("|");
+			}
+
+			function scheduleNextRefresh(hasNewData) {
+				if (hasNewData) {
+					refreshDelayIndex = 0;
+				} else {
+					refreshDelayIndex = Math.min(refreshDelayIndex + 1, refreshDelaysMs.length - 1);
+				}
+
+				const delay = refreshDelaysMs[refreshDelayIndex];
+				window.clearTimeout(refreshTimer);
+				nextRefreshAt = Date.now() + delay;
+				updateRefreshCountdown();
+				refreshTimer = window.setTimeout(refreshData, delay);
+			}
+
+			function updateRefreshCountdown() {
+				if (!refreshCountdown || !nextRefreshAt) return;
+				const seconds = Math.max(0, Math.ceil((nextRefreshAt - Date.now()) / 1000));
+				refreshCountdown.textContent = "Refresh in " + seconds + "s";
+			}
+
+			function setTelemetryOnline(isOnline) {
+				if (!telemetryStatus) return;
+				telemetryStatus.textContent = isOnline ? "Live Telemetry" : "Live Telemetry - offline";
+				telemetryStatus.classList.toggle("offline", !isOnline);
+			}
+
+			function autoScrollGallery() {
+				if (!galleryViewport) return;
+				const maxScroll = galleryViewport.scrollHeight - galleryViewport.clientHeight;
+				if (maxScroll <= 0) return;
+				if (galleryViewport.scrollTop >= maxScroll - 1) {
+					galleryViewport.scrollTop = 0;
+					return;
+				}
+				galleryViewport.scrollTop += 1;
+			}
+
+			async function refreshData() {
+				let hasNewData = false;
+				let callsSucceeded = false;
+				try {
+					const previousMetricFingerprint = currentMetricFingerprint();
+					const previousGalleryFingerprint = galleryFingerprint;
+					const metricsRes = await fetch(metricsPath(), { cache: "no-store" });
+					if (metricsRes.ok) {
+						const metricsJson = await metricsRes.json();
+						hasNewData = metricFingerprint(metricsJson) !== previousMetricFingerprint;
+						renderMetrics(metricsJson);
+					}
+
+					const screenshotsRes = await fetch(withTenant(apiRoot + "/screenshots"), { cache: "no-store" });
+					if (screenshotsRes.ok) {
+						const screenshotURLs = await screenshotsRes.json();
+						hasNewData = hasNewData || screenshotURLs.join("|") !== previousGalleryFingerprint;
+						renderScreenshots(screenshotURLs);
+					}
+					callsSucceeded = metricsRes.ok && screenshotsRes.ok;
+				} catch (_err) {
+					// Ignore transient polling errors and recover on next tick.
+				} finally {
+					setTelemetryOnline(callsSucceeded);
+					scheduleNextRefresh(hasNewData);
+				}
+			}
+
+			setInterval(autoScrollGallery, 40);
+			countdownTimer = window.setInterval(updateRefreshCountdown, 250);
+			refreshData();
+		})();
+	</script>
+</body>
+</html>

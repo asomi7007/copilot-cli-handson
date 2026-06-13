@@ -1,0 +1,16 @@
+# 빌드 산출물
+bin/
+obj/
+publish/
+*.zip
+
+# SQLite 런타임 파일
+*.db
+*.db-wal
+*.db-shm
+
+# OS/에디터
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp

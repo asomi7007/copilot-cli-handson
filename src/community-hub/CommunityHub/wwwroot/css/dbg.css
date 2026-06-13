@@ -1,0 +1,66 @@
+main.debug-page {
+	max-width: none;
+	margin: 36px auto;
+	padding: 0 44px;
+}
+
+.debug-meta {
+	max-width: 920px;
+	margin-bottom: 30px;
+}
+
+.debug-table {
+	margin-top: 34px;
+}
+
+.debug-actions {
+	max-width: 920px;
+	margin: 24px 0 30px;
+	padding: 18px;
+	border: 1px solid var(--line);
+	background: rgba(0, 0, 0, 0.18);
+}
+
+.debug-actions h2 {
+	margin-top: 0;
+}
+
+.debug-delete-form {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 12px;
+	align-items: center;
+}
+
+.debug-delete-form select {
+	min-width: 180px;
+}
+
+.debug-delete-form .danger {
+	border-color: #ff6b6b;
+}
+
+.debug-status {
+	color: #78d676;
+}
+
+.debug-error {
+	color: #ff8585;
+}
+
+.debug-table-scroll {
+	overflow-x: auto;
+	border-top: 1px solid var(--line);
+}
+
+.debug-table-scroll table {
+	min-width: 720px;
+	margin-top: 0;
+}
+
+.debug-table-scroll td {
+	font-family: var(--mono);
+	font-size: 0.82rem;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
