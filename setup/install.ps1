@@ -12,7 +12,7 @@
 #     Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 #     .\install.ps1
 #
-#  What it installs: Node.js 22 -> GitHub Copilot CLI
+#  What it installs: Node.js 22 -> GitHub Copilot CLI -> Git
 #  Administrator rights are required (winget + global npm install).
 #  If auto-install fails, manual download links are shown on screen.
 # =====================================================================
@@ -84,7 +84,33 @@ try {
     exit 1
 }
 
-# --- 3. Workspace folder (fixed location) ---------------------------
+# --- 3. Git (for change rewind; optional but recommended) -----------
+Write-Step "Step 3/3: Check Git"
+$gitOk = $false
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    Write-OK "Git already installed"
+    $gitOk = $true
+} else {
+    Write-Step "Installing Git (via winget)"
+    try {
+        winget install --id Git.Git -e --accept-source-agreements --accept-package-agreements
+        # Refresh PATH for the current session so 'git' works without reopening
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+                    [System.Environment]::GetEnvironmentVariable("Path","User")
+        if (Get-Command git -ErrorAction SilentlyContinue) {
+            Write-OK "Git installed"
+            $gitOk = $true
+        } else {
+            Write-Warn2 "Git installed but not on PATH yet. Open a NEW PowerShell later if 'git' is not found."
+            $gitOk = $true
+        }
+    } catch {
+        Write-Warn2 "Git auto-install failed. It is optional (used for undo/rewind)."
+        Write-Host "    Install manually if you want: https://git-scm.com/download/win" -ForegroundColor White
+    }
+}
+
+# --- 4. Workspace folder (fixed location) ---------------------------
 Write-Step "Prepare workspace folder"
 $BasePath = Join-Path $env:USERPROFILE $BaseFolderName
 $GamePath = Join-Path $BasePath $GameFolderName
@@ -95,12 +121,16 @@ if (Test-Path $GamePath) {
     New-Item -ItemType Directory -Path $GamePath | Out-Null
     Write-OK "Created workspace: $GamePath"
 }
-Push-Location $GamePath
-if (-not (Test-Path (Join-Path $GamePath ".git"))) {
-    git init 2>$null | Out-Null
-    Write-OK "git initialized (so you can undo changes)"
+if ($gitOk -and (Get-Command git -ErrorAction SilentlyContinue)) {
+    Push-Location $GamePath
+    if (-not (Test-Path (Join-Path $GamePath ".git"))) {
+        git init 2>$null | Out-Null
+        Write-OK "git initialized (so you can undo changes)"
+    }
+    Pop-Location
+} else {
+    Write-Warn2 "Skipped git init (git not available yet). You can run 'git init' in the folder later."
 }
-Pop-Location
 
 # --- Done ------------------------------------------------------------
 Write-Host "`n============================================================" -ForegroundColor Green

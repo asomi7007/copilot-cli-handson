@@ -83,7 +83,26 @@ else
   exit 1
 fi
 
-# --- 3. Workspace folder (fixed location) ---------------------------
+# --- 3. Git (for change rewind; optional but recommended) -----------
+cyan ""
+cyan "==> Step 3/3: Check Git"
+GIT_OK=0
+if command -v git >/dev/null 2>&1; then
+  green "  [OK] Git already installed"
+  GIT_OK=1
+else
+  if command -v brew >/dev/null 2>&1; then
+    cyan "==> Installing Git via Homebrew"
+    if brew install git; then green "  [OK] Git installed"; GIT_OK=1; fi
+  fi
+  if [ "$GIT_OK" -eq 0 ]; then
+    yellow "  [WARN] Git not found. It is optional (used for undo/rewind)."
+    echo   "    macOS: run 'xcode-select --install'  or  'brew install git'"
+    echo   "    Linux: install via your package manager (e.g. 'sudo apt install git')"
+  fi
+fi
+
+# --- 4. Workspace folder (fixed location) ---------------------------
 cyan ""
 cyan "==> Prepare workspace folder"
 BASE_PATH="$HOME/$BASE_FOLDER_NAME"
@@ -95,9 +114,13 @@ else
   mkdir -p "$GAME_PATH"
   green "  [OK] Created workspace: $GAME_PATH"
 fi
-if [ ! -d "$GAME_PATH/.git" ]; then
-  ( cd "$GAME_PATH" && git init >/dev/null 2>&1 )
-  green "  [OK] git initialized (so you can undo changes)"
+if command -v git >/dev/null 2>&1; then
+  if [ ! -d "$GAME_PATH/.git" ]; then
+    ( cd "$GAME_PATH" && git init >/dev/null 2>&1 )
+    green "  [OK] git initialized (so you can undo changes)"
+  fi
+else
+  yellow "  [WARN] Skipped git init (git not available). You can run 'git init' later."
 fi
 
 # --- Done ------------------------------------------------------------
