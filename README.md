@@ -1,17 +1,5 @@
 # 🎮 GitHub Copilot CLI 핸즈온 — 나만의 방식으로 만들고 공유하기
 
-Microsoft Teams 모임
-
-참가:
-https://teams.microsoft.com/meet/43485343561391?p=8vnCNMxniOiaC7RZ2Q
-
-모임 ID:
-434 853 435 613 91
-
-암호:
-No7qp6Ex
-
-
 > GitHub Copilot을 **터미널(CLI)에서** 직접 써보는 실습입니다. 프로그래밍을 몰라도 괜찮습니다.
 > 자연어(평소 말하듯)로 명령하면 Copilot이 게임을 만들고, 화면을 캡처해 공유하고, 나만의 규칙과 기능까지 만들어 줍니다.
 
